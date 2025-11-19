@@ -71,6 +71,7 @@ export default async function handler(req, res) {
             console.log("✅ Profile created or updated:", profileId);
 
             // ✅ Step 2️⃣ — Subscribe to lists with consent
+            // ✅ Step 2️⃣ — Subscribe to lists with consent (new schema)
             const subscribeRes = await fetch(
                 "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/",
                 {
@@ -84,19 +85,24 @@ export default async function handler(req, res) {
                     body: JSON.stringify({
                         data: {
                             type: "profile-subscription-bulk-create-job",
-                            attributes: {
-                                subscriptions: LIST_IDS.map((listId) => ({
-                                    channels: phone ? ["email", "sms"] : ["email"],
-                                    profiles: [
-                                        {
-                                            email,
-                                            first_name: name || "",
-                                            phone_number: phone || "",
-                                            location,
+                            relationships: {
+                                subscriptions: {
+                                    data: LIST_IDS.map((listId) => ({
+                                        type: "subscription-bulk-create-job-subscription",
+                                        attributes: {
+                                            channels: phone ? ["email", "sms"] : ["email"],
+                                            profiles: [
+                                                {
+                                                    email,
+                                                    first_name: name || "",
+                                                    phone_number: phone || "",
+                                                    location,
+                                                },
+                                            ],
+                                            list_id: listId,
                                         },
-                                    ],
-                                    list_id: listId,
-                                })),
+                                    })),
+                                },
                             },
                         },
                     }),
@@ -115,6 +121,7 @@ export default async function handler(req, res) {
             }
 
             console.log("📬 Klaviyo subscription success:", subData);
+
         }
 
         return res.status(200).json({ message: "Processed successfully" });
