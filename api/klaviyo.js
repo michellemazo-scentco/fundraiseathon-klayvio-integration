@@ -23,8 +23,11 @@ export default async function handler(req, res) {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Klaviyo-API-Key ${KLAVIYO_API_KEY}`
+                        'Accept': 'application/json',
+                        'Authorization': `Klaviyo-API-Key ${API_KEY}`,
+                        'revision': '2024-06-15'
                     },
+
                     body: JSON.stringify({
                         data: [
                             {
@@ -39,7 +42,9 @@ export default async function handler(req, res) {
                     })
                 });
 
-                const result = await response.json();
+                const text = await response.text();
+                const result = text ? JSON.parse(text) : {}; // ✅ safe parsing
+
                 console.log(`Klaviyo Response for ${listId}:`, result);
             }
         }
