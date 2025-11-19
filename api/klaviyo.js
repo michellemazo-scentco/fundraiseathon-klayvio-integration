@@ -4,7 +4,17 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { email, name, phone, marketing, city, state, geocoded_region, geocoded_city, geocoded_country, } = req.body;
+        const {
+            email,
+            name,
+            phone,
+            marketing,
+            city,
+            state,
+            geocoded_region,
+            geocoded_city,
+            geocoded_country,
+        } = req.body;
         console.log("Incoming body:", req.body);
 
         if (!email) {
@@ -33,8 +43,6 @@ export default async function handler(req, res) {
                     "Accept": "application/json",
                     "revision": "2025-10-15",
                 },
-
-
                 body: JSON.stringify({
                     data: {
                         type: "profile",
@@ -62,60 +70,48 @@ export default async function handler(req, res) {
             const profileId = profileData.data?.id;
             console.log("✅ Profile created or updated:", profileId);
 
-            // Step 2️⃣ — Add profile to each list
-            for (const listId of LIST_IDS) {
-                const addRes = await fetch(
-                    `https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`,
-                    {
-                        method: "POST",
-                        headers: {
-                            "Authorization": `Klaviyo-API-Key ${API_KEY}`,
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                            "revision": "2025-10-15",
+            // ✅ Step 2️⃣ — Subscribe to lists with consent
+            const subscribeRes = await fetch(
+                "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/",
+                {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Klaviyo-API-Key ${API_KEY}`,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "revision": "2025-10-15",
+                    },
+                    body: JSON.stringify({
+                        data: {
+                            type: "profile-subscription-bulk-create-job",
+                            attributes: {
+                                subscriptions: LIST_IDS.map((listId) => ({
+                                    channels: phone ? ["email", "sms"] : ["email"],
+                                    profiles: [
+                                        {
+                                            email,
+                                            first_name: name || "",
+                                            phone_number: phone || "",
+                                            location,
+                                        },
+                                    ],
+                                    list_id: listId,
+                                })),
+                            },
                         },
-                        body: JSON.stringify({
-                            data: {
-                                type: "profile-subscription-bulk-create-job",
-                                attributes: {
-                                    subscriptions: LIST_IDS.map((listId) => ({
-                                        channels: ["email"], // ✅ Records marketing consent
-                                        profiles: [
-                                            {
-                                                email,
-                                                first_name: name || "",
-                                                phone_number: phone || "",
-                                                location,
-                                            },
-                                        ],
-                                        list_id: listId,
-                                    })),
-                                },
-                            }
-                        }),
-                    }
-                );
-
-                const subText = await subscribeRes.text();
-                const subData = subText ? JSON.parse(subText) : {};
-
-                if (!subscribeRes.ok) {
-                    console.error("❌ Subscription failed:", subData);
-                    return res.status(subscribeRes.status).json({
-                        error: "Failed to subscribe profile",
-                        details: subData,
-                    });
+                    }),
                 }
+            );
 
-                // Handle empty 204
-                if (addRes.status === 204) {
-                    console.log(`📬 Added ${email} to list ${listId}`);
-                    continue;
-                }
+            const subText = await subscribeRes.text();
+            const subData = subText ? JSON.parse(subText) : {};
 
-                const addText = await addRes.text();
-                const addData = addText ? JSON.parse(addText) : {};
-                console.log(`📬 Klaviyo Response for ${listId}:`, addData);
+            if (!subscribeRes.ok) {
+                console.error("❌ Subscription failed:", subData);
+                return res.status(subscribeRes.status).json({
+                    error: "Failed to subscribe profile",
+                    details: subData,
+                });
             }
 
             console.log("📬 Klaviyo subscription success:", subData);
@@ -127,3 +123,4 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: "Internal Server Error" });
     }
 }
+
