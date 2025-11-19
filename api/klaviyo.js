@@ -4,6 +4,7 @@
 // and tag their profile with custom properties.
 
 export default async function handler(req, res) {
+    console.log("hello");
     try {
 
         // -----------------------------------------------------
