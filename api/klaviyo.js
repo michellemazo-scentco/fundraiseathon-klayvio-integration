@@ -4,7 +4,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { email, name, phone, marketing } = req.body;
+        const { email, name, phone, street1, street2, city, state, zip, marketing } = req.body;
         console.log("Incoming body:", req.body);
 
         if (!email) {
@@ -18,8 +18,18 @@ export default async function handler(req, res) {
                 process.env.KLAVIYO_LIST_2,
             ];
 
-            // Step 1️⃣ — Create or update profile
-            const profileRes = await fetch("https://a.klaviyo.com/api/profiles", {
+            // ✅ Step 1 — Build location object if available
+            const location = {
+                address1: street1 || "",
+                address2: street2 || "",
+                city: city || "",
+                region: state || "",
+                zip: zip || "",
+                country: "US", // optional, you can detect dynamically
+            };
+
+            // ✅ Step 2 — Subscribe via bulk subscription endpoint
+            const subscribeRes = await fetch("https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/", {
                 method: "POST",
                 headers: {
                     "Authorization": `Klaviyo-API-Key ${API_KEY}`,
@@ -29,57 +39,34 @@ export default async function handler(req, res) {
                 },
                 body: JSON.stringify({
                     data: {
-                        type: "profile",
+                        type: "profile-subscription-bulk-create-job",
                         attributes: {
-                            email,
-                            first_name: name || "",
-                            phone_number: phone || "",
+                            subscriptions: LIST_IDS.map((listId) => ({
+                                channels: ["email"], // you can add "sms" if needed
+                                profiles: [
+                                    {
+                                        email,
+                                        first_name: name || "",
+                                        phone_number: phone || "",
+                                        location,
+                                    },
+                                ],
+                                list_id: listId,
+                            })),
                         },
                     },
                 }),
             });
 
-            const profileText = await profileRes.text();
-            const profileData = profileText ? JSON.parse(profileText) : {};
+            const text = await subscribeRes.text();
+            const result = text ? JSON.parse(text) : {};
+            console.log("📬 Klaviyo subscription result:", result);
 
-            if (!profileRes.ok) {
-                console.error("❌ Profile creation failed:", profileData);
-                return res.status(profileRes.status).json({
-                    error: "Failed to create profile",
-                    details: profileData,
+            if (!subscribeRes.ok) {
+                return res.status(subscribeRes.status).json({
+                    error: "Failed to subscribe profile",
+                    details: result,
                 });
-            }
-
-            const profileId = profileData.data?.id;
-            console.log("✅ Profile created or updated:", profileId);
-
-            // Step 2️⃣ — Add profile to each list
-            for (const listId of LIST_IDS) {
-                const addRes = await fetch(
-                    `https://a.klaviyo.com/api/lists/${listId}/relationships/profiles`,
-                    {
-                        method: "POST",
-                        headers: {
-                            "Authorization": `Klaviyo-API-Key ${API_KEY}`,
-                            "Content-Type": "application/json",
-                            "Accept": "application/json",
-                            "revision": "2025-10-15",
-                        },
-                        body: JSON.stringify({
-                            data: [{ type: "profile", id: profileId }],
-                        }),
-                    }
-                );
-
-                // Handle empty 204
-                if (addRes.status === 204) {
-                    console.log(`📬 Added ${email} to list ${listId}`);
-                    continue;
-                }
-
-                const addText = await addRes.text();
-                const addData = addText ? JSON.parse(addText) : {};
-                console.log(`📬 Klaviyo Response for ${listId}:`, addData);
             }
         }
 
