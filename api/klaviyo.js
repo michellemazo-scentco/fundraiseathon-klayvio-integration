@@ -1,77 +1,68 @@
 export default async function handler(req, res) {
-    if (req.method !== 'POST') {
-        return res.status(405).json({ error: 'Method not allowed' });
-    }
-
     try {
-        const { email, name, phone, marketing } = req.body;
-        console.log("Incoming body:", req.body);
+        if (req.method !== "POST") {
+            return res.status(405).json({ error: "Method not allowed" });
+        }
 
-        if (!email) return res.status(400).json({ error: "Missing email field" });
+        const {
+            email,
+            name,
+            phone,
+            marketing,
+            street1,
+            street2,
+            city,
+            state,
+            zip
+        } = req.body;
 
-        // Only run if marketing consent given
-        if (marketing && (marketing === 'on' || marketing === true)) {
-            const API_KEY = process.env.KLAVIYO_API_KEY;
-            const LISTS = [
-                process.env.KLAVIYO_LIST_1, // <-- must be UUIDs, not short IDs
-                process.env.KLAVIYO_LIST_2
-            ];
+        // Only add to Klaviyo if "marketing" checkbox was ON
+        const optedIn = marketing === "on" || marketing === true || marketing === "true";
 
-            // 1️⃣ Create or update profile
-            const profileResponse = await fetch("https://a.klaviyo.com/api/profiles/", {
+        if (!optedIn) {
+            return res.status(200).json({ message: "User did not opt in. Skipping Klaviyo." });
+        }
+
+        // ---- Klaviyo API ----
+        const KLAVIYO_API_KEY = process.env.KLAVIYO_PRIVATE_KEY;
+        const KLAVIYO_LIST_ID = process.env.KLAVIYO_LIST_ID;
+
+        const klaviyoRes = await fetch(
+            `https://a.klaviyo.com/api/v2/list/${KLAVIYO_LIST_ID}/members`,
+            {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "Authorization": `Klaviyo-API-Key ${API_KEY}`
+                    "api-key": KLAVIYO_API_KEY
                 },
                 body: JSON.stringify({
-                    data: {
-                        type: "profile",
-                        attributes: {
+                    profiles: [
+                        {
                             email,
-                            first_name: name || "",
-                            phone_number: phone || ""
+                            properties: {
+                                name,
+                                phone,
+                                street1,
+                                street2,
+                                city,
+                                state,
+                                zip,
+                                source: "Fundraiser Request Form"
+                            }
                         }
-                    }
+                    ]
                 })
-            });
-
-            const profileData = await profileResponse.json();
-            console.log("Profile creation result:", profileData);
-
-            if (!profileResponse.ok) {
-                return res.status(profileResponse.status).json({
-                    error: "Failed to create profile",
-                    details: profileData
-                });
             }
+        );
 
-            const profileId = profileData.data?.id;
+        const result = await klaviyoRes.json();
 
-            // 2️⃣ Subscribe to multiple lists
-            for (const listId of LISTS) {
-                const subResponse = await fetch(`https://a.klaviyo.com/api/lists/${listId}/relationships/profiles/`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Klaviyo-API-Key ${API_KEY}`
-                    },
-                    body: JSON.stringify({
-                        data: [
-                            { type: "profile", id: profileId }
-                        ]
-                    })
-                });
-
-                const subResult = await subResponse.json();
-                console.log(`Subscribed ${email} to ${listId}:`, subResult);
-            }
-        }
-
-        return res.status(200).json({ message: "Processed successfully" });
+        return res.status(200).json({
+            message: "User added to Klaviyo",
+            klaviyo: result
+        });
     } catch (error) {
-        console.error("Server Error:", error);
-        return res.status(500).json({ error: "Internal Server Error" });
+        console.error(error);
+        return res.status(500).json({ error: error.message });
     }
 }
-
