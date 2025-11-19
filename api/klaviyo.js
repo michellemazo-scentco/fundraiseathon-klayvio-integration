@@ -3,32 +3,33 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: "Method not allowed" });
     }
 
+    // ✅ Handle both raw and JSON payloads
+    let body;
     try {
-        const { email, name, phone, street1, street2, city, state, zip, marketing } = req.body;
-        console.log("Incoming body:", req.body);
+        body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
+    } catch {
+        return res.status(400).json({ error: "Invalid JSON format" });
+    }
 
-        if (!email) {
-            return res.status(400).json({ error: "Missing email field" });
-        }
+    try {
+        const { email, name, phone, street1, street2, city, state, zip, marketing } = body;
+        console.log("Incoming body:", body);
+
+        if (!email) return res.status(400).json({ error: "Missing email field" });
 
         if (marketing && (marketing === "on" || marketing === true)) {
             const API_KEY = process.env.KLAVIYO_API_KEY;
-            const LIST_IDS = [
-                process.env.KLAVIYO_LIST_1,
-                process.env.KLAVIYO_LIST_2,
-            ];
+            const LIST_IDS = [process.env.KLAVIYO_LIST_1, process.env.KLAVIYO_LIST_2];
 
-            // ✅ Step 1 — Build location object if available
             const location = {
                 address1: street1 || "",
                 address2: street2 || "",
                 city: city || "",
                 region: state || "",
                 zip: zip || "",
-                country: "US", // optional, you can detect dynamically
+                country: "US",
             };
 
-            // ✅ Step 2 — Subscribe via bulk subscription endpoint
             const subscribeRes = await fetch("https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/", {
                 method: "POST",
                 headers: {
@@ -42,7 +43,7 @@ export default async function handler(req, res) {
                         type: "profile-subscription-bulk-create-job",
                         attributes: {
                             subscriptions: LIST_IDS.map((listId) => ({
-                                channels: ["email"], // you can add "sms" if needed
+                                channels: ["email"],
                                 profiles: [
                                     {
                                         email,
