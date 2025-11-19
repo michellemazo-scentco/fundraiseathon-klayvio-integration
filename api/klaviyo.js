@@ -12,7 +12,7 @@ export default async function handler(req, res) {
 
         // Only add to Klaviyo if marketing is checked
         if (marketing && (marketing === 'on' || marketing === true)) {
-            const KLAVIYO_API_KEY = process.env.KLAVIYO_API_KEY;
+            const API_KEY = process.env.KLAVIYO_API_KEY;
             const LIST_IDS = [
                 process.env.KLAVIYO_LIST_1,
                 process.env.KLAVIYO_LIST_2
