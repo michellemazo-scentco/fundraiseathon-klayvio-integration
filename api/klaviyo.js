@@ -4,7 +4,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const { email, name, phone, marketing } = req.body;
+        const { email, name, phone, marketing, city, state, geocoded_region, geocoded_city, geocoded_country, } = req.body;
         console.log("Incoming body:", req.body);
 
         if (!email) {
@@ -18,6 +18,12 @@ export default async function handler(req, res) {
                 process.env.KLAVIYO_LIST_2,
             ];
 
+            const location = {
+                city: city || geocoded_city || "",
+                region: state || geocoded_region || "",
+                country: geocoded_country || "United States",
+            };
+
             // Step 1️⃣ — Create or update profile
             const profileRes = await fetch("https://a.klaviyo.com/api/profiles", {
                 method: "POST",
@@ -27,6 +33,8 @@ export default async function handler(req, res) {
                     "Accept": "application/json",
                     "revision": "2025-10-15",
                 },
+
+
                 body: JSON.stringify({
                     data: {
                         type: "profile",
@@ -34,6 +42,7 @@ export default async function handler(req, res) {
                             email,
                             first_name: name || "",
                             phone_number: phone || "",
+                            location,
                         },
                     },
                 }),
