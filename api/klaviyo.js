@@ -1,24 +1,22 @@
-// This file runs as a Serverless Function on Vercel.
-// Basin will send a POST request here after your Shopify form is submitted.
-// If the user opted into marketing, we will add them to TWO Klaviyo lists
-// and tag their profile with custom properties.
+// -----------------------------------------------
+// Vercel Serverless Function
+// Handles Basin webhook submissions
+// Subscribes opted-in users to TWO Klaviyo lists
+// using the NEW Klaviyo v3 Subscription API.
+//
+// IMPORTANT: This requires Klaviyo private key with:
+// - Profiles Read + Write
+// - Lists Read + Write
+// -----------------------------------------------
 
 export default async function handler(req, res) {
-    console.log("hello");
     try {
-
-        // -----------------------------------------------------
-        // 1. Only allow POST requests. Reject everything else.
-        // -----------------------------------------------------
+        // 1. Allow only POST requests
         if (req.method !== "POST") {
             return res.status(405).json({ error: "Method not allowed" });
         }
 
-        // -----------------------------------------------------
-        // 2. Extract the data that Basin sends in the webhook.
-        // Basin webhook JSON should match your Basin template:
-        // { "email": "...", "marketing": "on", etc. }
-        // -----------------------------------------------------
+        // 2. Extract data from Basin webhook
         const {
             email,
             name,
@@ -35,141 +33,113 @@ export default async function handler(req, res) {
             comments
         } = req.body || {};
 
-        // -----------------------------------------------------
-        // 3. Email is REQUIRED to add someone to Klaviyo.
-        // If it's missing, we cannot continue.
-        // -----------------------------------------------------
+        // Must have an email to subscribe in Klaviyo
         if (!email) {
             return res.status(400).json({ error: "Missing email" });
         }
 
-        // -----------------------------------------------------
-        // 4. Detect whether user opted into marketing.
-        // Basin typically sends:
-        // - "on" when checkbox is checked
-        // - nothing when unchecked
-        // We support multiple truthy values for flexibility.
-        // -----------------------------------------------------
+        // 3. Determine marketing opt-in status
         const optedIn =
             marketing === "on" ||
-            marketing === "true" ||
             marketing === true ||
+            marketing === "true" ||
             marketing === "yes";
 
-        // -----------------------------------------------------
-        // 5. If user did NOT opt in → Stop here.
-        // This prevents adding them to any Klaviyo list.
-        // -----------------------------------------------------
+        // If not opted in → skip Klaviyo
         if (!optedIn) {
             return res.status(200).json({
-                message: "User did not opt in. Skipping Klaviyo."
+                message: "User did not opt in. Skipping Klaviyo subscription."
             });
         }
 
-        // -----------------------------------------------------
-        // 6. Load Klaviyo credentials from Vercel env vars.
-        // Set these in:
-        // Vercel → Project → Settings → Environment Variables
-        // -----------------------------------------------------
-        const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
-        console.log("Private key loaded in Vercel:", process.env.KLAVIYO_PRIVATE_KEY);
+        // 4. Load Klaviyo credentials from Vercel env vars
+        const KLAVIYO_API_KEY = process.env.KLAVIYO_PRIVATE_KEY;
+        const LIST_1 = process.env.KLAVIYO_LIST_ID_MAIN; // Main marketing list
+        const LIST_2 = process.env.KLAVIYO_LIST_ID_FAT;  // Fundraise-a-thon list
 
-
-        // Two Klaviyo lists:
-        // • LIST_1: Main marketing list
-        // • LIST_2: Fundraise-a-thon specific marketing list
-        const LIST_1 = process.env.KLAVIYO_LIST_ID_MAIN;
-        const LIST_2 = process.env.KLAVIYO_LIST_ID_FAT;
-
-        if (!KLAVIYO_PRIVATE_KEY || !LIST_1 || !LIST_2) {
+        if (!KLAVIYO_API_KEY || !LIST_1 || !LIST_2) {
             return res.status(500).json({
-                error: "Missing Klaviyo environment variables"
+                error: "Missing environment variables for Klaviyo"
             });
         }
 
-        // -----------------------------------------------------
-        // 7. Build the profile object once.
-        // This will be reused to add the user to BOTH lists.
-        // Custom properties act as "tags" in Klaviyo.
-        // -----------------------------------------------------
-        const profilePayload = {
-            profiles: [
-                {
-                    email,
-                    properties: {
-                        name,
-                        phone,
-                        street1,
-                        street2,
-                        city,
-                        state,
-                        zip,
-                        goal,
-                        group,
-                        payment_method,
-                        comments,
+        // 5. Build Klaviyo v3 subscription payload
+        // Docs: https://developers.klaviyo.com/en/reference/create_subscriptions
+        const subscribePayload = {
+            data: {
+                type: "subscription",
+                attributes: {
+                    profile: {
+                        data: {
+                            type: "profile",
+                            attributes: {
+                                email: email,
+                                // Custom properties (acts as tags in Klaviyo)
+                                properties: {
+                                    name,
+                                    phone,
+                                    street1,
+                                    street2,
+                                    city,
+                                    state,
+                                    zip,
+                                    goal,
+                                    group,
+                                    payment_method,
+                                    comments,
 
-                        // ------------------------------
-                        // Custom Klaviyo tags ("properties")
-                        // These appear in Klaviyo under Profile > Custom Properties.
-                        // ------------------------------
-                        fundraise_source: "Fundraise-a-thon",
-                        list_assignment: "marketing + fundraiser request form",
-                        timestamp_added: new Date().toISOString()
-                    }
+                                    // ------------------------------
+                                    // FUNDRAISE-A-THON tags
+                                    // ------------------------------
+                                    fundraise_source: "Fundraise-a-thon",
+                                    lead_origin: "Fundraiser Request Form",
+                                    timestamp_added: new Date().toISOString()
+                                }
+                            }
+                        }
+                    },
+                    // Subscribe user to BOTH lists
+                    list_ids: [LIST_1, LIST_2]
                 }
-            ]
+            }
         };
 
-        // -----------------------------------------------------
-        // 8. Reusable function to add user to a Klaviyo list.
-        // We call this twice (for two lists).
-        // -----------------------------------------------------
-        async function addToList(listId) {
-            const response = await fetch(
-                `https://a.klaviyo.com/api/v2/list/${listId}/members`,
-                {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "api-key": KLAVIYO_PRIVATE_KEY
-                    },
-                    body: JSON.stringify(profilePayload)
-                }
-            );
-
-            // If Klaviyo returns an error (bad API key, wrong list ID, etc.)
-            if (!response.ok) {
-                const err = await response.text();
-                console.error(`Klaviyo list ${listId} error:`, err);
-                throw new Error(`Failed to add to Klaviyo list ${listId}`);
+        // 6. Call Klaviyo v3 API
+        const response = await fetch(
+            "https://a.klaviyo.com/api/profile-subscriptions/",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    // NEW AUTH HEADER for v3 API
+                    "Klaviyo-API-Key": KLAVIYO_API_KEY
+                },
+                body: JSON.stringify(subscribePayload)
             }
+        );
 
-            return response.json();
+        // 7. Klaviyo returns validation errors here
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error("🔥 Klaviyo v3 API Error:", errorText);
+
+            return res.status(500).json({
+                error: "Klaviyo API error",
+                detail: errorText
+            });
         }
 
-        // -----------------------------------------------------
-        // 9. Add the user to BOTH Klaviyo lists.
-        // This is the new feature you wanted.
-        // -----------------------------------------------------
-        const result1 = await addToList(LIST_1);
-        const result2 = await addToList(LIST_2);
+        // 8. Parse success response
+        const result = await response.json();
 
-        // -----------------------------------------------------
-        // 10. Send a clear success response (visible in Vercel logs).
-        // -----------------------------------------------------
         return res.status(200).json({
-            message: "User successfully added to BOTH Klaviyo lists.",
-            added_to_list_1: result1,
-            added_to_list_2: result2
+            message: "🎉 User subscribed through Klaviyo v3 API successfully.",
+            klaviyo_result: result
         });
 
     } catch (error) {
-        // -----------------------------------------------------
-        // 11. Catch any unexpected errors to avoid silent failures.
-        // These appear in Vercel logs.
-        // -----------------------------------------------------
-        console.error("Handler error:", error);
+        // 9. Catch unexpected failures
+        console.error("🔥 Handler Error:", error);
         return res.status(500).json({ error: error.message });
     }
 }
