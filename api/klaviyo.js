@@ -71,6 +71,8 @@ export default async function handler(req, res) {
         // Vercel → Project → Settings → Environment Variables
         // -----------------------------------------------------
         const KLAVIYO_PRIVATE_KEY = process.env.KLAVIYO_PRIVATE_KEY;
+        console.log("Private key loaded in Vercel:", process.env.KLAVIYO_PRIVATE_KEY);
+
 
         // Two Klaviyo lists:
         // • LIST_1: Main marketing list
