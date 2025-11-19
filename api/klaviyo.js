@@ -65,7 +65,7 @@ export default async function handler(req, res) {
             // Step 2️⃣ — Add profile to each list
             for (const listId of LIST_IDS) {
                 const addRes = await fetch(
-                    `https://a.klaviyo.com/api/lists/${listId}/relationships/profiles`,
+                    `https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs/`,
                     {
                         method: "POST",
                         headers: {
@@ -75,10 +75,37 @@ export default async function handler(req, res) {
                             "revision": "2025-10-15",
                         },
                         body: JSON.stringify({
-                            data: [{ type: "profile", id: profileId }],
+                            data: {
+                                type: "profile-subscription-bulk-create-job",
+                                attributes: {
+                                    subscriptions: LIST_IDS.map((listId) => ({
+                                        channels: ["email"], // ✅ Records marketing consent
+                                        profiles: [
+                                            {
+                                                email,
+                                                first_name: name || "",
+                                                phone_number: phone || "",
+                                                location,
+                                            },
+                                        ],
+                                        list_id: listId,
+                                    })),
+                                },
+                            }
                         }),
                     }
                 );
+
+                const subText = await subscribeRes.text();
+                const subData = subText ? JSON.parse(subText) : {};
+
+                if (!subscribeRes.ok) {
+                    console.error("❌ Subscription failed:", subData);
+                    return res.status(subscribeRes.status).json({
+                        error: "Failed to subscribe profile",
+                        details: subData,
+                    });
+                }
 
                 // Handle empty 204
                 if (addRes.status === 204) {
@@ -90,6 +117,8 @@ export default async function handler(req, res) {
                 const addData = addText ? JSON.parse(addText) : {};
                 console.log(`📬 Klaviyo Response for ${listId}:`, addData);
             }
+
+            console.log("📬 Klaviyo subscription success:", subData);
         }
 
         return res.status(200).json({ message: "Processed successfully" });
