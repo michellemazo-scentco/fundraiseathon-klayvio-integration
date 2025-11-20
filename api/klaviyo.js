@@ -103,9 +103,9 @@ export default async function handler(req, res) {
             }
 
             // Step 3️⃣ — Subscribe user to email/SMS
-            const subscriptions = {};
-            if (marketing) subscriptions.email = "subscribe";
-            if (phone) subscriptions.sms = "subscribe";
+            const subscriptions = { email: "subscribe" };
+            /*if (marketing) subscriptions.email = "subscribe";
+            if (phone) subscriptions.sms = "subscribe";*/
 
             const subscriptionPayload = {
                 data: {
@@ -115,7 +115,7 @@ export default async function handler(req, res) {
                         profiles: [
                             {
                                 email,
-                                ...(phone ? { phone_number: phone } : {})
+                                /*...(phone ? { phone_number: phone } : {})*/
                             }
                         ],
                         subscriptions,
