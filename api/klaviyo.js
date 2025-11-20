@@ -90,6 +90,58 @@ export default async function handler(req, res) {
                 const addData = addText ? JSON.parse(addText) : {};
                 console.log(`📬 Klaviyo Response for ${listId}:`, addData);
             }
+
+            // Step 3️⃣ — Subscribe user to email/SMS
+            const subscriptionRes = await fetch(
+                "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
+                {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Klaviyo-API-Key ${API_KEY}`,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "revision": "2025-10-15",
+                    },
+                    body: JSON.stringify({
+                        data: {
+                            type: "profile-subscription-bulk-create-job",
+                            attributes: {
+                                // Historical import FALSE so double opt-in (if enabled) works normally
+                                historical_import: false,
+
+                                // OPTIONAL: only needed if historical_import = true
+                                // consented_at: new Date().toISOString(),
+
+                                profiles: [
+                                    {
+                                        email, // REQUIRED for email subscription
+                                        phone_number: phone || undefined, // optional, if also subscribing to SMS
+                                    }
+                                ],
+
+                                // The channels you want to subscribe them to
+                                subscriptions: {
+                                    email: marketing ? "subscribe" : undefined,
+                                    sms: phone ? "subscribe" : undefined,
+                                },
+
+                                // You can attach a list if you want consent tied to that list
+                                list_id: process.env.KLAVIYO_LIST_1,
+                            },
+                        },
+                    }),
+                }
+            );
+
+            const subText = await subscriptionRes.text();
+            const subData = subText ? JSON.parse(subText) : {};
+
+            if (!subscriptionRes.ok) {
+                console.error("❌ Subscription failed:", subData);
+            } else {
+                console.log("✅ Subscribed to marketing:", subData);
+            }
+
         }
 
         return res.status(200).json({ message: "Processed successfully" });
