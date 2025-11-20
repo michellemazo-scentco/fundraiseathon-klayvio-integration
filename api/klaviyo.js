@@ -103,36 +103,27 @@ export default async function handler(req, res) {
                     type: "profile-subscription-bulk-create-job",
                     attributes: {
                         historical_import: false,
+                        subscriptions: {
+                            email: "subscribe"
+                        },
+                        profiles: [
+                            {
+                                type: "profile",
+                                id: profileId
+                            }
+                        ]
                     },
                     relationships: {
                         list: {
                             data: {
                                 type: "list",
-                                id: process.env.KLAVIYO_LIST_1,
-                            },
-                        },
-                        profiles: {
-                            data: [
-                                {
-                                    type: "profile",
-                                    id: profileId,
-                                },
-                            ],
-                        },
-                        subscriptions: {
-                            data: [
-                                {
-                                    type: "subscription",
-                                    attributes: {
-                                        channel: "email",
-                                        status: "subscribed",
-                                    },
-                                },
-                            ],
-                        },
-                    },
-                },
+                                id: process.env.KLAVIYO_LIST_1
+                            }
+                        }
+                    }
+                }
             };
+
 
             console.log("🚨 FINAL SUBSCRIPTION PAYLOAD:", JSON.stringify(subscriptionPayload, null, 2));
 
