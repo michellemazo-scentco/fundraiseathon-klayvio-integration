@@ -1,213 +1,231 @@
-// /api/usebasin/klaviyo-subscribe.js
-// Vercel Serverless / Next.js API route
-
-const KLAVIYO_API_URL = 'https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs';
-const KLAVIYO_REVISION = '2025-10-15'; // keep in sync with Klaviyo docs
-
-/** Convert “marketing” checkbox values to boolean. */
-function toBool(val) {
-    if (val === undefined || val === null) return false;
-    if (typeof val === 'boolean') return val;
-    if (typeof val === 'number') return val === 1;
-    const s = String(val).trim().toLowerCase();
-    return ['1', 'true', 'yes', 'on', 'checked'].includes(s);
-}
-
-/** Minimal safe JSON parse for cases where body is a string. */
-function parseBody(body) {
-    if (!body) return {};
-    if (typeof body === 'object') return body;
-    try {
-        return JSON.parse(body);
-    } catch {
-        try {
-            // support x-www-form-urlencoded forwarded as raw text
-            return Object.fromEntries(new URLSearchParams(body));
-        } catch {
-            return {};
-        }
-    }
-}
-
-/** Split a full name into first/last (very basic). */
-function splitName(name) {
-    if (!name || typeof name !== 'string') return { first_name: undefined, last_name: undefined };
-    const parts = name.trim().split(/\s+/);
-    if (parts.length === 1) return { first_name: parts[0], last_name: undefined };
-    return { first_name: parts.slice(0, -1).join(' '), last_name: parts.slice(-1).join(' ') };
-}
-
-/** Build the profile.attributes payload for Klaviyo subscribe job. */
-function buildProfileAttributes(payload, req) {
-    const email = payload.email?.trim();
-    const phone = payload.phone?.trim() || payload.phone_number?.trim();
-    const { first_name, last_name } = splitName(payload.name);
-
-    // location: only include keys that have values
-    const location = {
-        address1: payload.street1 || payload.address1,
-        address2: payload.street2 || payload.address2,
-        city: payload.city,
-        region: payload.state || payload.region,
-        zip: payload.zip || payload.postal_code || payload.postcode,
-        country: payload.country, // don't guess; include only if provided
-        ip: (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim() || undefined,
-    };
-    Object.keys(location).forEach((k) => (location[k] === undefined || location[k] === '') && delete location[k]);
-
-    // optional context/properties for easier segmentation/debugging
-    const properties = {
-        source: 'Shopify Fundraiser Request',
-        form: 'fundraiser-account-request',
-        fundraiser_goal: payload.goal,
-        school_group_name: payload.group,
-        payment_method: payload.payment_method,
-        comments: payload.comments,
-    };
-    Object.keys(properties).forEach((k) => (properties[k] === undefined || properties[k] === '') && delete properties[k]);
-
-    const attrs = {
-        email,
-        ...(phone ? { phone_number: phone } : {}),
-        ...(first_name ? { first_name } : {}),
-        ...(last_name ? { last_name } : {}),
-        ...(Object.keys(location).length ? { location } : {}),
-        ...(Object.keys(properties).length ? { properties } : {}),
-
-        // Crucial: set consent to SUBSCRIBED so profile is actually subscribed (not “Never Subscribed”)
-        // Ref: Klaviyo "Subscribe Profiles" guide examples.
-        subscriptions: {
-            email: {
-                marketing: {
-                    consent: 'SUBSCRIBED',
-                },
-            },
-        },
-    };
-
-    return attrs;
-}
-
-/** POST a single subscribe job to a list. */
-async function subscribeToList({ apiKey, listId, profileAttributes }) {
-    const body = {
-        data: {
-            type: 'profile-subscription-bulk-create-job',
-            attributes: {
-                profiles: {
-                    data: [
-                        {
-                            type: 'profile',
-                            attributes: profileAttributes,
-                        },
-                    ],
-                },
-            },
-            relationships: {
-                list: {
-                    data: { type: 'list', id: listId },
-                },
-            },
-        },
-    };
-
-    const res = await fetch(KLAVIYO_API_URL, {
-        method: 'POST',
-        headers: {
-            Authorization: `Klaviyo-API-Key ${apiKey}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            revision: KLAVIYO_REVISION, // Klaviyo API version header
-        },
-        body: JSON.stringify(body),
-    });
-
-    // Klaviyo returns 202 (async job). Treat 202 as success.
-    const ok = res.status === 202;
-    let json;
-    try {
-        json = await res.json();
-    } catch {
-        json = null;
-    }
-
-    return { ok, status: res.status, data: json };
-}
+// File: /api/basin-to-klaviyo.js
+// Runtime: Node.js 18+ (Vercel Serverless Function)
+//
+// ENV VARS (set in Vercel Project Settings):
+// - KLAVIYO_PRIVATE_KEY        (required)  e.g. pk_********
+// - KLAVIYO_LIST_A_ID          (required)  e.g. Y6nRLr
+// - KLAVIYO_LIST_B_ID          (required)  e.g. X1y2Z3
+// - WEBHOOK_AUTH_BEARER        (optional)  shared secret; Basin can send "Authorization: Bearer <token>"
+// - DEFAULT_COUNTRY_CODE       (optional)  e.g. "US" (used if your form doesn't pass a country)
+//
+// Why: We upsert profile first (to store location), then use Klaviyo's subscription endpoint
+// for explicit marketing consent (adds to list & sets consent). This avoids "Never Subscribed".
 
 export default async function handler(req, res) {
-    if (req.method !== 'POST') {
-        res.setHeader('Allow', 'POST');
-        return res.status(405).json({ ok: false, error: 'Method not allowed' });
-    }
-
-    // Check env
-    const apiKey = process.env.KLAVIYO_API_KEY;
-    const list1 = process.env.KLAVIYO_LIST_1;
-    const list2 = process.env.KLAVIYO_LIST_2;
-    if (!apiKey || !list1 || !list2) {
-        console.error('Missing env vars: KLAVIYO_API_KEY, KLAVIYO_LIST_1, KLAVIYO_LIST_2');
-        return res.status(500).json({ ok: false, error: 'Server not configured' });
-    }
-
-    const payload = parseBody(req.body);
-    const logBase = {
-        event: 'usebasin.form.received',
-        email: payload.email,
-        marketing: payload.marketing,
-        ip: (req.headers['x-forwarded-for'] || '').split(',')[0]?.trim(),
-    };
-    console.log('[Webhook] Payload summary:', logBase);
-
-    // Require email
-    if (!payload.email || String(payload.email).trim() === '') {
-        console.warn('[Webhook] Missing email, skipping subscribe.');
-        return res.status(200).json({ ok: true, skipped: true, reason: 'missing_email' });
-    }
-
-    // Respect marketing opt-in
-    const optedIn = toBool(payload.marketing);
-    if (!optedIn) {
-        console.log('[Webhook] User did not opt into marketing; no subscription performed.');
-        return res.status(200).json({ ok: true, skipped: true, reason: 'no_marketing_opt_in' });
-    }
-
-    // Build profile
-    const profileAttributes = buildProfileAttributes(payload, req);
-    console.log('[Klaviyo] Profile attributes (redacted):', {
-        ...profileAttributes,
-        email: '[redacted]',
-        phone_number: profileAttributes.phone_number ? '[redacted]' : undefined,
-    });
-
-    // Subscribe to both lists in parallel
     try {
-        const [r1, r2] = await Promise.allSettled([
-            subscribeToList({ apiKey, listId: list1, profileAttributes }),
-            subscribeToList({ apiKey, listId: list2, profileAttributes }),
-        ]);
+        if (req.method !== "POST") {
+            res.setHeader("Allow", "POST");
+            return res.status(405).json({ error: "Method Not Allowed" });
+        }
 
-        const result = {
-            list1: r1.status === 'fulfilled' ? r1.value : { ok: false, error: r1.reason?.message || 'unknown' },
-            list2: r2.status === 'fulfilled' ? r2.value : { ok: false, error: r2.reason?.message || 'unknown' },
-        };
+        // ---- Optional: simple bearer verification (UseBasin can send a custom Authorization header) ----
+        const requiredBearer = process.env.WEBHOOK_AUTH_BEARER;
+        const gotAuth = req.headers.authorization || "";
+        if (requiredBearer) {
+            const expected = `Bearer ${requiredBearer}`;
+            if (gotAuth !== expected) {
+                return res.status(401).json({ error: "Unauthorized" });
+            }
+        }
 
-        console.log('[Klaviyo] Subscribe results:', {
-            list1: { ok: result.list1.ok, status: result.list1.status },
-            list2: { ok: result.list2.ok, status: result.list2.status },
+        // ---- Parse body for JSON or x-www-form-urlencoded ----
+        const contentType = (req.headers["content-type"] || "").toLowerCase();
+        let payload = {};
+        if (contentType.includes("application/json")) {
+            payload = req.body || {};
+        } else if (contentType.includes("application/x-www-form-urlencoded")) {
+            // Vercel doesn't parse urlencoded by default; read raw
+            const raw = await readRawBody(req);
+            payload = Object.fromEntries(new URLSearchParams(raw));
+        } else {
+            // Try best-effort JSON parse
+            payload = typeof req.body === "object" ? req.body : {};
+        }
+
+        // ---- Normalize incoming fields from the Shopify form via Basin ----
+        // Form fields present in the HTML snippet:
+        // name, email, phone (+E.164 assembled client-side), city, state, zip, marketing (checkbox "on"/true)
+        const email = str(payload.email);
+        if (!email) return res.status(400).json({ error: "Missing email" });
+
+        const name = str(payload.name);
+        const { first_name, last_name } = splitName(name);
+
+        const phone = str(payload.phone); // already E.164 per your client code
+        const city = str(payload.city);
+        const region = str(payload.state);
+        let country = str(payload.country);
+        if (!country) {
+            // Heuristic: if a US state code is provided, default to US unless you pass DEFAULT_COUNTRY_CODE.
+            const defaultCountry = str(process.env.DEFAULT_COUNTRY_CODE);
+            if (region && isLikelyUSState(region)) country = defaultCountry || "US";
+            else if (defaultCountry) country = defaultCountry;
+        }
+
+        // Marketing checkbox from your form: name="marketing"
+        const marketingOptIn = isChecked(payload.marketing);
+        if (!marketingOptIn) {
+            // Respect consent; don't add or subscribe
+            return res.status(200).json({ status: "skipped", reason: "marketing not opted in" });
+        }
+
+        // Optional custom properties you may wish to keep on the profile
+        const profileProperties = pruneUndefined({
+            signup_source: "Shopify Fundraiser Form",
+            goal: str(payload.goal),
+            group: str(payload.group),
+            payment_method: str(payload.payment_method),
+            zip: str(payload.zip),
         });
 
-        const ok = Boolean(result.list1.ok) && Boolean(result.list2.ok);
-        return res.status(ok ? 200 : 207).json({ ok, result });
+        // ---- Step 1: Upsert profile (store location + basic attrs) ----
+        // Klaviyo Profiles API
+        const profileAttributes = pruneUndefined({
+            email,
+            phone_number: phone,
+            first_name,
+            last_name,
+            location: pruneUndefined({ city, region, country }),
+            properties: Object.keys(profileProperties).length ? profileProperties : undefined,
+        });
+
+        await klaviyoRequest("/api/profiles", "POST", {
+            data: { type: "profile", attributes: profileAttributes },
+        });
+
+        // ---- Step 2: Subscribe (consent + add to list) to two lists ----
+        const listA = process.env.KLAVIYO_LIST_1;
+        const listB = process.env.KLAVIYO_LIST_2;
+        if (!listA || !listB) {
+            return res.status(500).json({ error: "Missing KLAVIYO_LIST_A_ID or KLAVIYO_LIST_B_ID" });
+        }
+
+        const subscribeBody = (listId) => ({
+            data: {
+                type: "profile-subscription-bulk-create-job",
+                attributes: {
+                    // Include identifiers + consent. (Keep this minimal to avoid validation surprises.)
+                    profiles: {
+                        data: [
+                            {
+                                type: "profile",
+                                attributes: {
+                                    email,
+                                    // Set email marketing consent
+                                    subscriptions: {
+                                        email: {
+                                            marketing: {
+                                                consent: "SUBSCRIBED",
+                                                // consented_at optional; let Klaviyo set now unless you need to backdate
+                                                // consented_at: new Date().toISOString(),
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                },
+                relationships: {
+                    list: {
+                        data: { type: "list", id: listId },
+                    },
+                },
+            },
+        });
+
+        const [aResp, bResp] = await Promise.all([
+            klaviyoRequest("/api/profile-subscription-bulk-create-jobs", "POST", subscribeBody(listA)),
+            klaviyoRequest("/api/profile-subscription-bulk-create-jobs", "POST", subscribeBody(listB)),
+        ]);
+
+        return res.status(200).json({
+            status: "ok",
+            email,
+            subscribed_lists: [listA, listB],
+            klaviyo_jobs: [aResp?.data?.id, bResp?.data?.id].filter(Boolean),
+        });
     } catch (err) {
-        console.error('[Klaviyo] Subscribe error:', err);
-        return res.status(500).json({ ok: false, error: 'subscribe_failed' });
+        // Only expose safe details
+        return res.status(500).json({
+            error: "Internal Error",
+            message: err?.message || String(err),
+        });
     }
 }
 
-/*
-Docs notes:
-- Endpoint: POST /api/profile-subscription-bulk-create-jobs with a list relationship; 202 Accepted on success.
-- Include subscriptions.email.marketing.consent="SUBSCRIBED" to actually subscribe the profile.
-- Use header "revision: 2025-10-15".
-Refs: Klaviyo "Collect email and SMS consent via API" (Subscribe Profiles + payload structure).
-*/
+/* ------------------------------ Helpers ------------------------------ */
+
+function str(v) {
+    if (v === undefined || v === null) return "";
+    return String(v).trim();
+}
+
+function isChecked(v) {
+    // Basin may send "on", "true", "1", "yes"
+    const s = str(v).toLowerCase();
+    return ["on", "true", "1", "yes", "y"].includes(s);
+}
+
+function splitName(full) {
+    if (!full) return { first_name: undefined, last_name: undefined };
+    const parts = full.split(/\s+/).filter(Boolean);
+    if (parts.length === 1) return { first_name: parts[0], last_name: undefined };
+    return { first_name: parts[0], last_name: parts.slice(1).join(" ") };
+}
+
+function isLikelyUSState(v) {
+    const s = str(v).toUpperCase();
+    const states = new Set([
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI",
+        "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT",
+        "VT", "VA", "WA", "WV", "WI", "WY", "DC", "PR"
+    ]);
+    return states.has(s);
+}
+
+function pruneUndefined(obj) {
+    if (!obj || typeof obj !== "object") return obj;
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        if (v !== undefined && v !== null && v !== "") out[k] = v;
+    }
+    return out;
+}
+
+async function klaviyoRequest(path, method, body) {
+    const base = "https://a.klaviyo.com";
+    const key = process.env.KLAVIYO_API_KEY;
+    if (!key) throw new Error("Missing KLAVIYO_PRIVATE_KEY");
+
+    const resp = await fetch(`${base}${path}`, {
+        method,
+        headers: {
+            "Authorization": `Klaviyo-API-Key ${key}`,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            // Use the latest stable revision (adjust if your account requires a fixed date)
+            "revision": "2025-10-15",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        // Keep error text for troubleshooting
+        throw new Error(`Klaviyo ${method} ${path} ${resp.status}: ${text}`);
+    }
+    // Jobs endpoints may return 204; guard parse
+    const text = await resp.text();
+    return text ? JSON.parse(text) : null;
+}
+
+function readRawBody(req) {
+    return new Promise((resolve, reject) => {
+        let data = "";
+        req.setEncoding("utf8");
+        req.on("data", (chunk) => (data += chunk));
+        req.on("end", () => resolve(data));
+        req.on("error", reject);
+    });
+}
