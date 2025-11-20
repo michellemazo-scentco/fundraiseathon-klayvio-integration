@@ -1,5 +1,4 @@
 // File: api/klaviyo-webhook.js
-// Node.js Vercel Serverless Function
 
 export default async function handler(req, res) {
     if (req.method !== "POST") {
@@ -7,14 +6,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        const {
-            email,
-            name,
-            city,
-            state,
-            country,
-            marketing,
-        } = req.body || {};
+        const { email, name, city, state, country, marketing } = req.body || {};
 
         if (!email) {
             return res.status(400).json({ error: "Missing email" });
@@ -29,8 +21,9 @@ export default async function handler(req, res) {
         const last_name = rest.join(" ");
 
         const profilePayload = {
-            profiles: [
-                {
+            data: {
+                type: "profile",
+                attributes: {
                     email,
                     first_name,
                     last_name,
@@ -43,40 +36,62 @@ export default async function handler(req, res) {
                         source: "Shopify Fundraiser Form",
                     },
                 },
-            ],
+            },
         };
 
         const headers = {
             Authorization: `Klaviyo-API-Key ${process.env.KLAVIYO_API_KEY}`,
             "Content-Type": "application/json",
+            accept: "application/json",
+            revision: "2023-02-22",
         };
 
-        // Add to List 2 (auto-subscribe)
-        const list2Response = await fetch(
-            `https://a.klaviyo.com/api/v2/list/${process.env.KLAVIYO_LIST_2}/subscribe`,
-            {
-                method: "POST",
-                headers,
-                body: JSON.stringify(profilePayload),
-            }
-        );
+        // Create or update the profile
+        const profileRes = await fetch("https://a.klaviyo.com/api/profiles/", {
+            method: "POST",
+            headers,
+            body: JSON.stringify(profilePayload),
+        });
 
-        if (!list2Response.ok) {
-            console.error("Error adding to List 2", await list2Response.text());
+        if (!profileRes.ok) {
+            const text = await profileRes.text();
+            console.error("Profile creation failed:", text);
+            throw new Error(text);
         }
 
-        // Add to List 1 (double opt-in)
-        const list1Response = await fetch(
-            `https://a.klaviyo.com/api/v2/list/${process.env.KLAVIYO_LIST_1}/subscribe`,
+        const profileData = await profileRes.json();
+        const profileId = profileData.data.id;
+
+        // Subscribe to List 2 (no double opt-in)
+        const list2Res = await fetch(
+            `https://a.klaviyo.com/api/lists/${process.env.KLAVIYO_LIST_2}/relationships/profiles/`,
             {
                 method: "POST",
                 headers,
-                body: JSON.stringify(profilePayload),
+                body: JSON.stringify({
+                    data: [{ type: "profile", id: profileId }],
+                }),
             }
         );
 
-        if (!list1Response.ok) {
-            console.error("Error adding to List 1", await list1Response.text());
+        if (!list2Res.ok) {
+            console.error("Error adding to List 2", await list2Res.text());
+        }
+
+        // Subscribe to List 1 (double opt-in)
+        const list1Res = await fetch(
+            `https://a.klaviyo.com/api/lists/${process.env.KLAVIYO_LIST_1}/relationships/profiles/`,
+            {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    data: [{ type: "profile", id: profileId }],
+                }),
+            }
+        );
+
+        if (!list1Res.ok) {
+            console.error("Error adding to List 1", await list1Res.text());
         }
 
         return res.status(200).json({
