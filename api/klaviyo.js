@@ -7,6 +7,17 @@ export default async function handler(req, res) {
         const { email, name, phone, marketing, city, state, geocoded_region, geocoded_city, geocoded_country, } = req.body;
         console.log("Incoming body:", req.body);
 
+        console.log("🔥 Incoming marketing debug:", {
+            marketing,
+            type: typeof marketing,
+            equals_on: marketing === "on",
+            equals_true_str: marketing === "true",
+            equals_true_bool: marketing === true,
+            equals_1: marketing === "1",
+            truthy: Boolean(marketing),
+        });
+
+
         if (!email) {
             return res.status(400).json({ error: "Missing email field" });
         }
@@ -114,6 +125,18 @@ export default async function handler(req, res) {
             };
 
             console.log("Subscription payload:", JSON.stringify(subscriptionPayload, null, 2));
+
+            console.log(
+                "🚨 FINAL SUBSCRIPTION PAYLOAD SENT TO KLAVIYO:",
+                JSON.stringify(subscriptionPayload, null, 2)
+            );
+
+            console.log("🚨 HEADERS SENT:", {
+                Authorization: `Klaviyo-API-Key ${API_KEY ? "[SET]" : "[MISSING]"}`,
+                revision: "2025-10-15"
+            });
+
+
 
             const subscriptionRes = await fetch(
                 "https://a.klaviyo.com/api/profile-subscription-bulk-create-jobs",
