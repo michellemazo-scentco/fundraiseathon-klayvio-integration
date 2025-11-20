@@ -1,19 +1,7 @@
-// File: /api/basin-to-klaviyo.js
-// Runtime: Node.js 18+ (Vercel)
-//
-// ENV (your names):
-// - KLAVIYO_API_KEY   (required)
-// - KLAVIYO_LIST_1    (required)
-// - KLAVIYO_LIST_2    (required)
-// Optional:
-// - WEBHOOK_AUTH_BEARER
-// - DEFAULT_COUNTRY_CODE
-//
-// Notes:
-// - Adds structured logs to Vercel (console.*).
-// - Subscribes SEQUENTIALLY to both lists and logs both outcomes.
+// File: /api/klaviyo.js
+// Runtime: Node.js 18+ (Vercel, CommonJS)
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
     const t0 = now();
     const reqId = rid();
 
@@ -24,7 +12,7 @@ export default async function handler(req, res) {
             return res.status(405).json({ error: "Method Not Allowed" });
         }
 
-        // ---- Optional bearer auth ----
+        // Optional bearer auth
         const requiredBearer = env("WEBHOOK_AUTH_BEARER");
         const gotAuth = req.headers.authorization || "";
         if (requiredBearer && gotAuth !== `Bearer ${requiredBearer}`) {
@@ -32,7 +20,7 @@ export default async function handler(req, res) {
             return res.status(401).json({ error: "Unauthorized" });
         }
 
-        // ---- Parse body ----
+        // Parse body
         const contentType = (req.headers["content-type"] || "").toLowerCase();
         let payload = {};
         if (contentType.includes("application/json")) {
@@ -44,7 +32,7 @@ export default async function handler(req, res) {
             payload = typeof req.body === "object" ? req.body : {};
         }
 
-        // ---- Normalize fields ----
+        // Normalize
         const email = str(payload.email);
         if (!email) {
             log(reqId, "missing_email", { payloadKeys: Object.keys(payload) });
@@ -77,23 +65,16 @@ export default async function handler(req, res) {
             zip: str(payload.zip),
         });
 
-        const klaviyoKey =
-            env("KLAVIYO_API_KEY") ||
-            env("KLAVIYO_PRIVATE_KEY"); // fallback to old name if present
-
+        const klaviyoKey = env("KLAVIYO_API_KEY") || env("KLAVIYO_PRIVATE_KEY"); // fallback
         const list1 = env("KLAVIYO_LIST_1") || env("KLAVIYO_LIST_A_ID");
         const list2 = env("KLAVIYO_LIST_2") || env("KLAVIYO_LIST_B_ID");
 
         if (!klaviyoKey || !list1 || !list2) {
-            log(reqId, "missing_env", {
-                hasKey: !!klaviyoKey,
-                hasList1: !!list1,
-                hasList2: !!list2,
-            });
+            log(reqId, "missing_env", { hasKey: !!klaviyoKey, hasList1: !!list1, hasList2: !!list2 });
             return res.status(500).json({ error: "Missing KLAVIYO_API_KEY or list ids" });
         }
 
-        // ---- Upsert profile ----
+        // Upsert profile (stores location)
         const profileAttributes = pruneUndefined({
             email,
             phone_number: phone,
@@ -117,8 +98,8 @@ export default async function handler(req, res) {
 
         log(reqId, "profiles_upsert_ok", { ms: since(t0) });
 
-        // ---- Subscribe to LIST 1 then LIST 2 (sequential for clearer logs) ----
-        const subscribeRes = { list1: null, list2: null, errors: [] };
+        // Subscribe to two lists (sequential for clear logs)
+        const subscribeRes = { list1: null, list2: null };
 
         subscribeRes.list1 = await subscribeOnce({
             email,
@@ -136,8 +117,8 @@ export default async function handler(req, res) {
             label: "list2",
         });
 
-        const okLists = [subscribeRes.list1?.id, subscribeRes.list2?.id].filter(Boolean);
-        const okCount = okLists.length;
+        const okJobs = [subscribeRes.list1?.id, subscribeRes.list2?.id].filter(Boolean);
+        const okCount = okJobs.length;
 
         log(reqId, "done", {
             email,
@@ -150,8 +131,9 @@ export default async function handler(req, res) {
             status: okCount === 2 ? "ok" : okCount === 1 ? "partial" : "failed",
             email,
             subscribed_lists: [list1, list2],
-            klaviyo_jobs: okLists,
+            klaviyo_jobs: okJobs,
             details: subscribeRes,
+            reqId,
         });
     } catch (err) {
         log(reqId, "fatal", { message: err?.message });
@@ -161,7 +143,7 @@ export default async function handler(req, res) {
             reqId,
         });
     }
-}
+};
 
 /* ------------------------------ Subscribe helper ------------------------------ */
 
@@ -224,7 +206,7 @@ async function klaviyoRequest(path, method, body, key, reqId) {
         Authorization: `Klaviyo-API-Key ${key}`,
         "Content-Type": "application/json",
         Accept: "application/json",
-        revision: "2025-10-15", // keep consistent across calls
+        revision: "2025-10-15",
     };
 
     const t = now();
@@ -237,13 +219,11 @@ async function klaviyoRequest(path, method, body, key, reqId) {
     const text = await resp.text().catch(() => "");
     const ms = since(t);
 
-    // Log every call outcome
     log(reqId, "klaviyo_call", {
         method,
         path,
         status: resp.status,
         ms,
-        // Keep payload minimal in logs (avoid PII)
         payloadSize: body ? JSON.stringify(body).length : 0,
         respPreview: text.slice(0, 240),
     });
@@ -287,10 +267,23 @@ function readRawBody(req) {
     });
 }
 function env(k) { return process.env[k] ? String(process.env[k]).trim() : ""; }
-function rid() { try { return crypto.randomUUID(); } catch { return "req_" + Math.random().toString(36).slice(2, 10); } }
 function now() { return (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now(); }
 function since(t) { return Math.round((now() - t)); }
 function truncate(s, n) { return s && s.length > n ? s.slice(0, n) + "…" : s; }
 
-// Minimal global to satisfy randomUUID in some environments
-const crypto = globalThis.crypto || (await import("node:crypto")).webcrypto;
+// Use Node's crypto (no ESM, no top-level await)
+const { randomUUID, webcrypto } = require("node:crypto");
+function rid() {
+    try { return randomUUID(); } catch { /* Node <14.17 */ }
+    try { return webcrypto.randomUUID(); } catch { /* older */ }
+    return "req_" + Math.random().toString(36).slice(2, 10);
+}
+
+// Basic console logger for Vercel
+function log(reqId, event, data) {
+    try {
+        console.log(JSON.stringify({ reqId, event, ...data }));
+    } catch {
+        console.log(`[${reqId}] ${event}`);
+    }
+}
