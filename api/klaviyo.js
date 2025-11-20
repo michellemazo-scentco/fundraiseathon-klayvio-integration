@@ -114,15 +114,18 @@ export default async function handler(req, res) {
                         historical_import: false,
                         profiles: [
                             {
-                                email,
-                                /*...(phone ? { phone_number: phone } : {})*/
+                                type: "profile",
+                                id: profileId      // <-- FIX
                             }
                         ],
-                        subscriptions,
+                        subscriptions: {
+                            email: "subscribe"
+                        },
                         list_id: process.env.KLAVIYO_LIST_1
                     }
                 }
             };
+
 
             console.log("Subscription payload:", JSON.stringify(subscriptionPayload, null, 2));
 
