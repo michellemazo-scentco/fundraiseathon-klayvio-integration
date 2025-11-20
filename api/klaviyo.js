@@ -115,16 +115,24 @@ export default async function handler(req, res) {
                         profiles: [
                             {
                                 type: "profile",
-                                id: profileId      // <-- FIX
+                                id: profileId
                             }
                         ],
                         subscriptions: {
                             email: "subscribe"
-                        },
-                        list_id: process.env.KLAVIYO_LIST_1
+                        }
+                    },
+                    relationships: {
+                        list: {
+                            data: {
+                                type: "list",
+                                id: process.env.KLAVIYO_LIST_1
+                            }
+                        }
                     }
                 }
             };
+
 
 
             console.log("Subscription payload:", JSON.stringify(subscriptionPayload, null, 2));
@@ -147,8 +155,8 @@ export default async function handler(req, res) {
                     method: "POST",
                     headers: {
                         "Authorization": `Klaviyo-API-Key ${API_KEY}`,
-                        "Content-Type": "application/json",
-                        "Accept": "application/json",
+                        "Content-Type": "application/vnd.api+json",
+                        "Accept": "application/vnd.api+json",
                         "revision": "2025-10-15",
                     },
                     body: JSON.stringify(subscriptionPayload),
