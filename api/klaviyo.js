@@ -32,7 +32,7 @@ export default async function handler(req, res) {
         }
 
         // Auth
-        const requiredBearer = process.env.WEBHOOK_AUTH_BEARER;
+        /*const requiredBearer = process.env.WEBHOOK_AUTH_BEARER;
         if (requiredBearer) {
             const gotAuth = req.headers.authorization || "";
             if (gotAuth !== `Bearer ${requiredBearer}`) {
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
                 return res.status(401).json({ error: "Unauthorized", reqId });
             }
             logInfo(reqId, "auth_ok");
-        }
+        }*/
 
         // Parse body
         const contentType = (req.headers["content-type"] || "").toLowerCase();
