@@ -114,8 +114,8 @@ export default async function handler(req, res) {
         });
 
         // Lists
-        const listA = str(process.env.KLAVIYO_LIST_A_ID);
-        const listB = str(process.env.KLAVIYO_LIST_B_ID);
+        const listA = str(process.env.KLAVIYO_LIST_1);
+        const listB = str(process.env.KLAVIYO_LIST_2);
         if (!listA || !listB) {
             logError(reqId, "missing_list_env", { listA: Boolean(listA), listB: Boolean(listB) });
             return res.status(500).json({ error: "Missing KLAVIYO_LIST_A_ID or KLAVIYO_LIST_B_ID", reqId });
@@ -408,7 +408,7 @@ class KlaviyoError extends Error {
 async function klaviyoRequest(path, method, body) {
     const base = "https://a.klaviyo.com";
     const key = process.env.KLAVIYO_PRIVATE_KEY;
-    if (!key) throw new Error("Missing KLAVIYO_PRIVATE_KEY");
+    if (!key) throw new Error("Missing KLAVIYO_API_KEY");
 
     const resp = await fetch(`${base}${path}`, {
         method,
