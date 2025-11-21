@@ -407,7 +407,7 @@ class KlaviyoError extends Error {
 
 async function klaviyoRequest(path, method, body) {
     const base = "https://a.klaviyo.com";
-    const key = process.env.KLAVIYO_PRIVATE_KEY;
+    const key = process.env.KLAVIYO_API_KEY;
     if (!key) throw new Error("Missing KLAVIYO_API_KEY");
 
     const resp = await fetch(`${base}${path}`, {
