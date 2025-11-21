@@ -1,32 +1,23 @@
 // File: /api/basin-to-klaviyo.js
-// Runtime: Node.js 18+ (Vercel Serverless Function)
+// Runtime: Node.js 18+
 //
-// ENV VARS (set in Vercel Project Settings):
-// - KLAVIYO_PRIVATE_KEY        (required)  e.g. pk_********
-// - KLAVIYO_LIST_A_ID          (required)  e.g. Y6nRLr
-// - KLAVIYO_LIST_B_ID          (required)  e.g. X1y2Z3
-// - WEBHOOK_AUTH_BEARER        (optional)  shared secret; Basin can send "Authorization: Bearer <token>"
-// - DEFAULT_COUNTRY_CODE       (optional)  e.g. "US" (fallback if form lacks country)
+// ENV VARS:
+// - KLAVIYO_PRIVATE_KEY   (required)  e.g. pk_********
+// - KLAVIYO_LIST_A_ID     (required)  e.g. Y6nRLr
+// - KLAVIYO_LIST_B_ID     (required)  e.g. X1y2Z3
+// - WEBHOOK_AUTH_BEARER   (optional)  shared secret for Basin
+// - DEFAULT_COUNTRY_CODE  (optional)  fallback country, e.g. "US"
 //
-// Purpose:
-// 1) Upsert a Klaviyo profile (store name/location/phone) to avoid "Never Subscribed" edge-cases.
-// 2) Explicitly subscribe to two lists with marketing consent for email (always) and SMS (only with valid E.164 phone).
-//
-// Logging:
-// - Structured JSON logs to Vercel via console.* with a per-request ID, minimal PII (redacted email/phone).
-// - Each major step logs start/success/failure + duration for faster debugging.
+// Why: Explicit "create" can 409 when profile exists. We upsert by catching 409 and PATCHing.
 
 export default async function handler(req, res) {
     const reqId = (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).toLowerCase();
     const startedAt = Date.now();
-
-    // Correlate server logs with client responses
     res.setHeader("X-Request-ID", reqId);
 
     logInfo(reqId, "request_received", {
         method: req.method,
         contentType: (req.headers["content-type"] || "").toLowerCase(),
-        userAgent: req.headers["user-agent"] || "",
     });
 
     try {
@@ -36,19 +27,18 @@ export default async function handler(req, res) {
             return res.status(405).json({ error: "Method Not Allowed", reqId });
         }
 
-        // ---- Optional bearer verification (why: prevent spoofed webhooks) ----
+        // Bearer check (why: avoid spoofed webhooks)
         const requiredBearer = process.env.WEBHOOK_AUTH_BEARER;
-        const gotAuth = req.headers.authorization || "";
         if (requiredBearer) {
-            const expected = `Bearer ${requiredBearer}`;
-            if (gotAuth !== expected) {
-                logWarn(reqId, "auth_failed", { hasAuthHeader: Boolean(gotAuth) });
+            const gotAuth = req.headers.authorization || "";
+            if (gotAuth !== `Bearer ${requiredBearer}`) {
+                logWarn(reqId, "auth_failed");
                 return res.status(401).json({ error: "Unauthorized", reqId });
             }
             logInfo(reqId, "auth_ok");
         }
 
-        // ---- Parse body for JSON or x-www-form-urlencoded (why: Basin can post either) ----
+        // Parse body (Basin may send JSON or urlencoded)
         const contentType = (req.headers["content-type"] || "").toLowerCase();
         let payload = {};
         if (contentType.includes("application/json")) {
@@ -60,18 +50,17 @@ export default async function handler(req, res) {
             payload = typeof req.body === "object" ? req.body : {};
         }
 
-        // ---- Normalize incoming fields ----
+        // Normalize
         const email = str(payload.email);
         if (!email) {
             logWarn(reqId, "missing_email");
             return res.status(400).json({ error: "Missing email", reqId });
         }
-
         const name = str(payload.name);
         const { first_name, last_name } = splitName(name);
 
         const rawPhone = str(payload.phone);
-        const phone = isE164Phone(rawPhone) ? rawPhone : ""; // why: Klaviyo rejects invalid phones in subscription jobs
+        const phone = isE164Phone(rawPhone) ? rawPhone : ""; // why: Klaviyo rejects invalid phone
 
         const city = str(payload.city);
         const region = str(payload.state);
@@ -84,18 +73,10 @@ export default async function handler(req, res) {
 
         const marketingOptIn = isChecked(payload.marketing);
         if (!marketingOptIn) {
-            logInfo(reqId, "consent_not_opted_in", {
-                email: redactEmail(email),
-                phone: redactPhone(phone),
-            });
-            return res.status(200).json({
-                status: "skipped",
-                reason: "marketing not opted in",
-                reqId,
-            });
+            logInfo(reqId, "consent_not_opted_in", { email: redactEmail(email), phone: redactPhone(phone) });
+            return res.status(200).json({ status: "skipped", reason: "marketing not opted in", reqId });
         }
 
-        // Optional extra properties
         const profileProperties = pruneUndefined({
             signup_source: "Shopify Fundraiser Form",
             goal: str(payload.goal),
@@ -104,44 +85,36 @@ export default async function handler(req, res) {
             zip: str(payload.zip),
         });
 
-        logInfo(reqId, "normalized_payload", {
-            email: redactEmail(email),
-            phone: redactPhone(phone),
-            city,
-            region,
-            country,
-            hasProps: Boolean(Object.keys(profileProperties).length),
-        });
-
-        // ---- Step 1: Upsert profile ----
         const profileAttributes = pruneUndefined({
             email,
             phone_number: phone,
             first_name,
             last_name,
             location: pruneUndefined({ city, region, country }),
-            properties: Object.keys(profileProperties).length
-                ? profileProperties
-                : undefined,
+            properties: Object.keys(profileProperties).length ? profileProperties : undefined,
         });
 
-        logInfo(reqId, "profiles_upsert_start");
-        await klaviyoRequest("/api/profiles", "POST", {
-            data: { type: "profile", attributes: profileAttributes },
+        logInfo(reqId, "profiles_upsert_start", {
+            email: redactEmail(email),
+            phone: redactPhone(phone),
+            hasProps: Boolean(Object.keys(profileProperties).length),
         });
-        logInfo(reqId, "profiles_upsert_ok");
 
-        // ---- Step 2: Subscribe to two lists with consent ----
+        // Upsert (create or update on 409)
+        const upsertResult = await upsertProfile(reqId, profileAttributes);
+
+        logInfo(reqId, "profiles_upsert_ok", {
+            created: upsertResult.created,
+            patched: upsertResult.patched,
+            profileId: upsertResult.profileId || null,
+        });
+
+        // Subscribe to two lists (email always; sms if phone present)
         const listA = str(process.env.KLAVIYO_LIST_1);
         const listB = str(process.env.KLAVIYO_LIST_2);
         if (!listA || !listB) {
-            logError(reqId, "missing_list_env", {
-                KLAVIYO_LIST_1: Boolean(listA),
-                KLAVIYO_LIST_2: Boolean(listB),
-            });
-            return res
-                .status(500)
-                .json({ error: "Missing KLAVIYO_LIST_A_ID or KLAVIYO_LIST_B_ID", reqId });
+            logError(reqId, "missing_list_env", { listA: Boolean(listA), listB: Boolean(listB) });
+            return res.status(500).json({ error: "Missing KLAVIYO_LIST_A_ID or KLAVIYO_LIST_B_ID", reqId });
         }
 
         const includeSms = Boolean(phone);
@@ -156,12 +129,10 @@ export default async function handler(req, res) {
                                 attributes: pruneUndefined({
                                     email,
                                     phone_number: phone || undefined,
-                                    // why: Keep minimal to reduce validation problems; Klaviyo timestamps consent.
+                                    // why: Minimal consent fields; Klaviyo timestamps internally
                                     subscriptions: {
                                         email: { marketing: { consent: "SUBSCRIBED" } },
-                                        ...(includeSms
-                                            ? { sms: { marketing: { consent: "SUBSCRIBED" } } }
-                                            : {}),
+                                        ...(includeSms ? { sms: { marketing: { consent: "SUBSCRIBED" } } } : {}),
                                     },
                                 }),
                             },
@@ -173,25 +144,15 @@ export default async function handler(req, res) {
         });
 
         logInfo(reqId, "subscribe_start", {
-            listA,
-            listB,
+            lists: [listA, listB],
             includeSms,
             email: redactEmail(email),
             phone: redactPhone(phone),
         });
 
-        // Create the two jobs in parallel; either error will bubble to catch.
         const [aResp, bResp] = await Promise.all([
-            klaviyoRequest(
-                "/api/profile-subscription-bulk-create-jobs",
-                "POST",
-                subscribeBody(listA)
-            ),
-            klaviyoRequest(
-                "/api/profile-subscription-bulk-create-jobs",
-                "POST",
-                subscribeBody(listB)
-            ),
+            klaviyoRequest("/api/profile-subscription-bulk-create-jobs", "POST", subscribeBody(listA)),
+            klaviyoRequest("/api/profile-subscription-bulk-create-jobs", "POST", subscribeBody(listB)),
         ]);
 
         const jobA = aResp?.data?.id || null;
@@ -209,9 +170,9 @@ export default async function handler(req, res) {
             klaviyo_jobs: [jobA, jobB].filter(Boolean),
             reqId,
             duration_ms: durationMs,
+            upsert: upsertResult,
         });
     } catch (err) {
-        // why: Log rich error details to Vercel; keep response minimal but include reqId for support.
         const durationMs = Date.now() - startedAt;
         logError(reqId, "unhandled_error", {
             message: err?.message || String(err),
@@ -224,6 +185,63 @@ export default async function handler(req, res) {
             reqId,
         });
     }
+}
+
+/* ----------------------- Upsert helper (create or patch) ----------------------- */
+// Why: POST /api/profiles 409s if the email/phone already exists. We catch 409 and PATCH that profile.
+
+async function upsertProfile(reqId, attributes) {
+    try {
+        const resp = await klaviyoRequest("/api/profiles", "POST", {
+            data: { type: "profile", attributes },
+        });
+        return { created: true, patched: false, profileId: resp?.data?.id || null };
+    } catch (e) {
+        if (e instanceof KlaviyoError && e.status === 409) {
+            const duplicateId = e.json?.errors?.[0]?.meta?.duplicate_profile_id || null;
+            logWarn(reqId, "profiles_create_conflict_409", {
+                duplicateId: duplicateId || null,
+                code: e.json?.errors?.[0]?.code || "duplicate_profile",
+            });
+
+            await diagnoseDuplicate(reqId, attributes);
+
+            // If Klaviyo tells us the ID directly, PATCH it.
+            if (duplicateId) {
+                await patchProfile(reqId, duplicateId, attributes);
+                return { created: false, patched: true, profileId: duplicateId };
+            }
+
+            // Fallback: lookup by email, then PATCH
+            const email = str(attributes.email);
+            const id = await getProfileIdByEmail(reqId, email);
+            if (!id) throw new Error(`Conflict without profile id and lookup failed for ${email}`);
+            await patchProfile(reqId, id, attributes);
+            return { created: false, patched: true, profileId: id };
+        }
+        throw e; // not a duplicate conflict
+    }
+
+}
+
+async function patchProfile(reqId, id, attributes) {
+    logInfo(reqId, "profiles_patch_start", { id });
+    await klaviyoRequest(`/api/profiles/${id}`, "PATCH", {
+        data: { type: "profile", id, attributes },
+    });
+    logInfo(reqId, "profiles_patch_ok", { id });
+}
+
+async function getProfileIdByEmail(reqId, email) {
+    // why: conflict response may omit meta.duplicate_profile_id
+    if (!email) return null;
+    const filterExpr = `equals(email,"${email}")`;
+    const path = `/api/profiles?filter=${encodeURIComponent(filterExpr)}&page[size]=1`;
+    logInfo(reqId, "profiles_lookup_by_email_start", { email: redactEmail(email) });
+    const resp = await klaviyoRequest(path, "GET");
+    const id = resp?.data?.[0]?.id || null;
+    logInfo(reqId, "profiles_lookup_by_email_ok", { found: Boolean(id) });
+    return id;
 }
 
 /* ------------------------------ Helpers ------------------------------ */
@@ -264,13 +282,49 @@ function pruneUndefined(obj) {
     return out;
 }
 
-// Minimal E.164 validation (why: avoid Klaviyo 400s on subscription job)
+// E.164 sanity check (why: avoid 400s on jobs)
 function isE164Phone(v) {
     const s = str(v);
     return /^\+[1-9]\d{1,14}$/.test(s);
 }
 
-// ---- Logging helpers (why: consistent, searchable Vercel logs) ----
+// --- Add this helper anywhere below other helpers ---
+async function diagnoseDuplicate(reqId, attributes) {
+    const email = str(attributes.email);
+    const phone = str(attributes.phone_number);
+    const out = {};
+
+    try {
+        if (email) {
+            const ef = `/api/profiles?filter=${encodeURIComponent(`equals(email,"${email}")`)}&page[size]=1`;
+            const eres = await klaviyoRequest(ef, "GET");
+            out.email_exists = Boolean(eres?.data?.length);
+            out.email_profile_id = eres?.data?.[0]?.id || null;
+        }
+    } catch (e) {
+        logWarn(reqId, "diagnose_email_lookup_failed", { message: e?.message });
+    }
+
+    try {
+        if (phone) {
+            const pf = `/api/profiles?filter=${encodeURIComponent(`equals(phone_number,"${phone}")`)}&page[size]=1`;
+            const pres = await klaviyoRequest(pf, "GET");
+            out.phone_exists = Boolean(pres?.data?.length);
+            out.phone_profile_id = pres?.data?.[0]?.id || null;
+        }
+    } catch (e) {
+        logWarn(reqId, "diagnose_phone_lookup_failed", { message: e?.message });
+    }
+
+    logInfo(reqId, "diagnose_duplicate_result", out);
+    return out;
+}
+
+
+
+/* --------------------------- Logging utilities --------------------------- */
+// why: Structured logs → easy search/correlation in Vercel
+
 function logInfo(reqId, msg, meta = {}) {
     console.log(JSON.stringify({ level: "info", reqId, msg, ts: new Date().toISOString(), ...safeMeta(meta) }));
 }
@@ -280,7 +334,6 @@ function logWarn(reqId, msg, meta = {}) {
 function logError(reqId, msg, meta = {}) {
     console.error(JSON.stringify({ level: "error", reqId, msg, ts: new Date().toISOString(), ...safeMeta(meta) }));
 }
-// Ensure we never leak secrets/PII accidentally
 function safeMeta(meta) {
     const clone = { ...meta };
     if ("authorization" in clone) clone.authorization = "[redacted]";
@@ -298,40 +351,53 @@ function redactPhone(phone) {
     return s.replace(/^\+?(\d{0,3})\d*(\d{2})$/, (_m, cc, tail) => `+${cc || ""}***${tail}`);
 }
 
-// ---- Klaviyo HTTP ----
+/* ------------------------------ HTTP core ------------------------------ */
+// why: Throw typed errors so caller can branch on 409
+
+class KlaviyoError extends Error {
+    constructor(message, { status, json, text, method, path }) {
+        super(message);
+        this.name = "KlaviyoError";
+        this.status = status;
+        this.json = json;
+        this.text = text;
+        this.method = method;
+        this.path = path;
+    }
+}
+
 async function klaviyoRequest(path, method, body) {
     const base = "https://a.klaviyo.com";
     const key = process.env.KLAVIYO_API_KEY;
     if (!key) throw new Error("Missing KLAVIYO_PRIVATE_KEY");
 
     const url = `${base}${path}`;
-    try {
-        const resp = await fetch(url, {
-            method,
-            headers: {
-                Authorization: `Klaviyo-API-Key ${key}`,
-                "Content-Type": "application/json",
-                Accept: "application/json",
-                revision: "2025-10-15", // pin stable API revision
-            },
-            body: body ? JSON.stringify(body) : undefined,
-        });
+    const resp = await fetch(url, {
+        method,
+        headers: {
+            Authorization: `Klaviyo-API-Key ${key}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            revision: "2025-10-15", // pinned revision
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
 
-        // Log non-2xx with body for easier troubleshooting
-        if (!resp.ok) {
-            const text = await resp.text().catch(() => "");
-            throw new Error(`Klaviyo ${method} ${path} ${resp.status}: ${text}`);
-        }
-
-        const text = await resp.text();
-        return text ? JSON.parse(text) : null;
-    } catch (e) {
-        // why: surface low-level network/parse errors with endpoint context
-        throw new Error(`[klaviyoRequest] ${method} ${path} failed: ${e?.message || e}`);
+    const text = await resp.text().catch(() => "");
+    if (!resp.ok) {
+        let json = null;
+        try { json = text ? JSON.parse(text) : null; } catch { }
+        throw new KlaviyoError(
+            `Klaviyo ${method} ${path} ${resp.status}: ${text || "[no body]"}`,
+            { status: resp.status, json, text, method, path }
+        );
     }
+    return text ? JSON.parse(text) : null;
 }
 
-// ---- Raw body reader for urlencoded ----
+
+
+/* ------------------------- Raw body for urlencoded ------------------------- */
 function readRawBody(req) {
     return new Promise((resolve, reject) => {
         let data = "";
@@ -341,4 +407,3 @@ function readRawBody(req) {
         req.on("error", reject);
     });
 }
-
